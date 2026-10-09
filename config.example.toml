@@ -1,0 +1,41 @@
+# web-search-mcp configuration. Copy to config.toml and fill in token_sha256
+# with the output of `web-search-mcp gen-token`. See README.md for details.
+
+# MCP endpoint path. With allow_token_in_url, clients may also use <path>/<token>.
+path = "/mcp"
+
+# claude.ai connectors (and so cloud scheduled tasks) can only be given a URL,
+# not headers, so they need the token in the URL.
+allow_token_in_url = true
+
+# Allow requests to loopback, private, link-local and similar addresses.
+allow_private_networks = false
+
+# Browser origins allowed to call the server. MCP clients don't send Origin.
+allowed_origins = []
+
+# user_agent = "web-search-mcp/0.1.0"
+
+[listen]
+host = "127.0.0.1" # the Docker image overrides this with HOST=0.0.0.0
+port = 8787
+
+[limits]
+timeout_ms = 30000              # whole request, including redirects and the body
+max_download_bytes = 5000000    # decompressed response bytes read
+max_request_body_bytes = 1000000
+max_redirects = 5               # GET only
+default_output_chars = 40000    # default max_length of a tool result
+max_output_chars = 200000       # largest max_length the model may ask for
+
+# One [[clients]] entry per token. A method with no patterns is disabled and its
+# tool isn't listed. Patterns: "https://example.com/page", "https://example.com/api/*",
+# "https://*.example.com/*", "*" (any public URL) - see README.md.
+[[clients]]
+name = "scheduled-job"
+token_sha256 = "REPLACE_WITH_token_sha256_FROM_gen-token"
+
+[clients.allow]
+GET = ["https://example.com/status/*"]
+POST = []
+PUT = []
