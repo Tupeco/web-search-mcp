@@ -16,7 +16,7 @@ Claude's tool permissions work on whole tools: you can't allow a fetch tool for 
 A tool call goes through these checks in order:
 
 1. **Connector permissions:** each tool can be allowed, made to need approval, or blocked in Claude's connector settings.
-2. **Token:** the server only answers clients that present a token listed in `config.toml`.
+2. **Token:** the server only answers clients that send `Authorization: Bearer <token>` with a token listed in `config.toml`.
 3. **Server allowlist:** the patterns configured for that token and method.
 4. **Client allowlist (optional):** patterns in the connector URL (`allow_get=…`) or in `X-Allow-*` headers. These can only narrow the server allowlist, never widen it.
 5. **Network guard:** the resolved IP address must be public, unless `allow_private_networks` is set.
@@ -57,28 +57,24 @@ A method that's disabled by step 3 or 4 isn't listed as a tool at all. Every red
    Check that it answers (on the server itself):
 
    ```sh
-   curl -s http://127.0.0.1:8787/mcp/$TOKEN -H 'Content-Type: application/json' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+   curl -s http://127.0.0.1:8787/mcp -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
    ```
 
-5. **Add the nginx location.** Put [`deploy/nginx.conf`](deploy/nginx.conf) inside your existing TLS `server` block and reload nginx. The snippet does three things:
+5. **Add the nginx location.** Put [`deploy/nginx.conf`](deploy/nginx.conf) inside your existing TLS `server` block and reload nginx. The snippet does two things:
    - It allows only Anthropic's published outbound range, `160.79.104.0/21` (see [IP addresses](https://platform.claude.com/docs/en/api/ip-addresses)). To test from elsewhere, add your own IP temporarily.
-   - It turns off the access log for this location, because the URL carries the token.
-   - It proxies the requests to the container.
+   - It proxies `/web-search/` to the container, stripping the prefix, so `https://<host>/web-search/mcp` reaches the server as `/mcp`.
 
-6. **Add the connector in Claude.** Add a custom connector with this URL:
+6. **Add the connector in Claude.** In the **Add custom connector** dialog:
+   - **URL:** `https://<host>/web-search/mcp`. Optionally, add a client-side allowlist with each pattern percent-encoded, such as `https://<host>/web-search/mcp?allow_get=https%3A%2F%2Fexample.com%2Fstatus%2F*`.
+   - **Authentication:** **No sign-in**. The dialog may mark "Sign in now" as *Detected*, because the server answers unauthenticated requests with `401`. This server doesn't use OAuth.
+   - **Request headers:** header `authorization`, value `Bearer <TOKEN>`, including `Bearer` and the space. Mark it required.
 
-   ```
-   https://mcp.example.com/mcp/<TOKEN>
-   ```
+   Authentication settings can't be edited later. To change the token, remove the connector and add it again.
 
-   Optionally, add a client-side allowlist to the URL, with each pattern percent-encoded:
+   In the connector's tool permissions (Customize > Connectors), allow `http_get` without approval, so the unattended job can use it, and set anything else it doesn't need to **Blocked**. Then attach the connector to the scheduled task.
 
-   ```
-   https://mcp.example.com/mcp/<TOKEN>?allow_get=https%3A%2F%2Fexample.com%2Fstatus%2F*
-   ```
-
-   In the connector's tool permissions, allow `http_get` without approval, so the unattended job can use it, and block anything else it doesn't need. Then attach the connector to the scheduled task.
+   If your dialog has no **Request headers** section (the feature is in beta), set `allow_token_in_url = true` and use `https://<host>/web-search/mcp/<TOKEN>` as the URL instead. Also uncomment `access_log off` in the nginx snippet, because the URL then carries the token.
 
 The server logs one JSON line per event to stdout (`docker logs web-search-mcp`). For each request it logs the client name, method, URL without its query string, status, size and duration. It also logs denials with their reason, and rejected connections (an unknown token or a disallowed `Origin`). It never logs request or response bodies, headers, query strings or tokens.
 
@@ -89,7 +85,7 @@ The server logs one JSON line per event to stdout (`docker logs web-search-mcp`)
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | `"/mcp"` | MCP endpoint path. |
-| `allow_token_in_url` | `false` | Also accept the token as the last path segment (`/mcp/<token>`). Needed for Claude connectors, which take only a URL. |
+| `allow_token_in_url` | `false` | Also accept the token as the last path segment (`/mcp/<token>`). This is a fallback for clients that can't send headers. |
 | `allow_private_networks` | `false` | Allow requests to loopback, private, link-local, CGNAT/Tailscale and similar addresses. |
 | `allowed_origins` | `[]` | Browser origins allowed to call the server. MCP clients normally don't send `Origin`. If connections fail and the log shows a rejected origin, add that origin here. |
 | `user_agent` | `"web-search-mcp/<version>"` | Default `User-Agent` for outgoing requests. |
@@ -127,13 +123,11 @@ A requested URL is rejected outright if it contains any of:
 The client can send its own allowlist. A request has to match both the server rules for the token **and** the client rules. Once the client sends any client-side rule, methods it doesn't mention are disabled.
 
 - **URL parameters:** `allow_get`, `allow_post`, `allow_put`, `allow_patch`, `allow_delete`, with one percent-encoded pattern per parameter (repeat the parameter for more).
-- **Headers**, for clients that support them: `X-Allow-Get`, `X-Allow-Post`, and so on, with patterns separated by spaces.
+- **Headers**, for clients that can send arbitrary headers, such as Claude Code: `X-Allow-Get`, `X-Allow-Post`, and so on, with patterns separated by spaces. Claude's connector dialog accepts only header names that Anthropic has approved, so use URL parameters there.
 
 To manage allowlists entirely from the client side, give the token `GET = ["*"]` (or whichever methods it needs) on the server. Each tool's description shows the model the patterns that apply to it.
 
-### Other clients
-
-Clients that can send headers, such as the Claude Code CLI, can use the plain `/mcp` path with `Authorization: Bearer <token>` instead of putting the token in the URL. With such clients you can leave `allow_token_in_url` off.
+### Claude Code CLI
 
 ```sh
 claude mcp add --transport http web https://mcp.example.com/mcp \

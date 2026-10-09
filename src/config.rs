@@ -208,7 +208,7 @@ mod tests {
         let filled = example.replace("REPLACE_WITH_token_sha256_FROM_gen-token", HASH);
         let config = Config::from_toml(&filled).unwrap();
         assert_eq!(config.clients[0].rules.get(Method::Get).len(), 1);
-        assert!(config.allow_token_in_url);
+        assert!(!config.allow_token_in_url);
         assert!(!config.allow_private_networks);
     }
 

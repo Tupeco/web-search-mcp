@@ -1,12 +1,12 @@
 # web-search-mcp configuration. Copy to config.toml and fill in token_sha256
 # with the output of `web-search-mcp gen-token`. See README.md for details.
 
-# MCP endpoint path. With allow_token_in_url, clients may also use <path>/<token>.
+# MCP endpoint path. Clients send the token as "Authorization: Bearer <token>".
 path = "/mcp"
 
-# claude.ai connectors (and so cloud scheduled tasks) can only be given a URL,
-# not headers, so they need the token in the URL.
-allow_token_in_url = true
+# Fallback for clients that can't send headers: also accept the token as the
+# last path segment, <path>/<token>. The token then shows up in URLs and logs.
+allow_token_in_url = false
 
 # Allow requests to loopback, private, link-local and similar addresses.
 allow_private_networks = false

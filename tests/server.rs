@@ -272,6 +272,20 @@ async fn token_and_allowlist_in_the_url() {
 }
 
 #[tokio::test]
+async fn header_token_with_allowlist_in_the_url() {
+    // The setup a Claude connector uses: token in a request header, allowlist in the URL.
+    let env = env();
+    let target = &env.target;
+    let encoded: String = url::form_urlencoded::byte_serialize(format!("{target}/gzip").as_bytes()).collect();
+    let url = format!("{}?allow_get={encoded}", env.mcp);
+    assert_eq!(tool_names(&url, TOKEN, &[]).await, ["http_get"]);
+    let ok = call(&url, "http_get", json!({"url": format!("{target}/gzip")}), TOKEN, &[]).await;
+    assert!(ok["result"]["isError"].is_null(), "{ok}");
+    let denied = call(&url, "http_get", json!({"url": format!("{target}/page")}), TOKEN, &[]).await;
+    assert_eq!(denied["result"]["isError"], true);
+}
+
+#[tokio::test]
 async fn invalid_client_allowlist_is_a_400() {
     let env = env();
     let reply = rpc_with(&env.mcp, "tools/list", json!({}), Some(TOKEN), &[("x-allow-get", "not-a-url")]).await;
