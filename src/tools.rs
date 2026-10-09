@@ -5,7 +5,7 @@ use crate::config::{Config, Limits};
 use crate::fetch::{FetchError, FetchRequest, FetchResponse, Fetcher};
 use crate::html_text::html_to_text;
 use crate::log::Logger;
-use crate::policy::{Method, Policy, parse_target_url};
+use crate::policy::{Method, Pattern, Policy, parse_target_url};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 use std::time::Instant;
@@ -14,6 +14,8 @@ use url::Url;
 pub struct ToolContext<'a> {
     pub config: &'a Config,
     pub client_name: &'a str,
+    /// Whether the token came in the URL path rather than the Authorization header.
+    pub token_in_url: bool,
     pub policy: &'a Policy,
     pub fetcher: &'a Fetcher,
     pub log: &'a Logger,
@@ -155,8 +157,90 @@ fn input_schema(method: Method, limits: &Limits) -> Value {
     json!({"type": "object", "properties": properties, "required": ["url"], "additionalProperties": false})
 }
 
+const INFO_TOOL: &str = "allowlist_info";
+
+fn info_tool() -> Value {
+    json!({
+        "name": INFO_TOOL,
+        "title": "Allowlist info",
+        "description": "Show which URLs each HTTP method may access, where those allowlists are defined \
+            (the server's config.toml or the connector URL) and how to change them. Makes no web requests.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+        "annotations": {
+            "title": "Allowlist info",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+        },
+    })
+}
+
+fn allowlist_info(ctx: &ToolContext<'_>) -> String {
+    let name = ctx.client_name;
+    let list = |patterns: &[Pattern]| patterns.iter().map(|p| format!("    - {}", p.source())).collect::<Vec<_>>();
+    let mut out = vec![
+        format!("Allowlists for client \"{name}\"."),
+        String::new(),
+        "Where they are defined:".to_owned(),
+        format!(
+            "- Server allowlist: config.toml on the server, under [clients.allow] in the [[clients]] entry \
+             named \"{name}\". Restart the server after changing it."
+        ),
+        "- Connector allowlist (optional): allow_get, allow_post, allow_put, allow_patch and allow_delete \
+         parameters in the connector URL (one percent-encoded pattern each), or X-Allow-<Method> request headers. \
+         When present, it can only narrow the server allowlist, and methods it doesn't list are disabled."
+            .to_owned(),
+        "A URL is allowed only if it matches both lists (the connector list only when present). \
+         \"*\" matches any characters."
+            .to_owned(),
+    ];
+    for method in Method::ALL {
+        let server = ctx.policy.server_patterns(method);
+        let client = ctx.policy.client_patterns(method);
+        let status = if ctx.policy.allows(method) {
+            "enabled".to_owned()
+        } else if server.is_empty() {
+            "disabled (no patterns in config.toml)".to_owned()
+        } else {
+            format!("disabled (the connector allowlist has no {} patterns)", method.param_name())
+        };
+        out.push(String::new());
+        out.push(format!("{method} ({}): {status}", spec(method).name));
+        if server.is_empty() {
+            out.push("  Server allowlist: none".to_owned());
+        } else {
+            out.push("  Server allowlist:".to_owned());
+            out.extend(list(server));
+        }
+        match client {
+            None => out.push("  Connector allowlist: not set".to_owned()),
+            Some([]) => out.push("  Connector allowlist: none".to_owned()),
+            Some(patterns) => {
+                out.push("  Connector allowlist:".to_owned());
+                out.extend(list(patterns));
+            }
+        }
+    }
+    let limits = &ctx.config.limits;
+    out.push(String::new());
+    out.push(format!(
+        "Other server settings (config.toml): requests to private networks are {}; timeout {} ms; \
+         maximum download {} bytes; at most {} redirects (GET only).",
+        if ctx.config.allow_private_networks { "allowed" } else { "blocked" },
+        limits.timeout_ms,
+        limits.max_download_bytes,
+        limits.max_redirects,
+    ));
+    out.push(format!(
+        "This connection sent its token {}.",
+        if ctx.token_in_url { "in the URL path" } else { "in the Authorization header" }
+    ));
+    out.join("\n")
+}
+
 pub fn list_tools(policy: &Policy, limits: &Limits) -> Vec<Value> {
-    policy
+    let mut tools: Vec<Value> = policy
         .methods()
         .into_iter()
         .map(|method| {
@@ -175,7 +259,9 @@ pub fn list_tools(policy: &Policy, limits: &Limits) -> Vec<Value> {
                 },
             })
         })
-        .collect()
+        .collect();
+    tools.push(info_tool());
+    tools
 }
 
 struct Args {
@@ -412,6 +498,14 @@ fn log_url(url: &Url) -> String {
 
 /// Runs a tool. Returns `None` if the tool doesn't exist for this client.
 pub async fn call_tool(name: &str, args: &Value, ctx: &ToolContext<'_>) -> Option<Value> {
+    if name == INFO_TOOL {
+        let empty = args.as_object().is_none_or(|a| a.values().all(Value::is_null));
+        return Some(if empty {
+            json!({"content": [{"type": "text", "text": allowlist_info(ctx)}]})
+        } else {
+            tool_error("Invalid arguments: allowlist_info takes no arguments".to_owned())
+        });
+    }
     let method = method_for_tool(name).filter(|m| ctx.policy.allows(*m))?;
     let args = match validate(method, args, &ctx.config.limits) {
         Ok(args) => args,

@@ -23,6 +23,8 @@ A tool call goes through these checks in order:
 
 A method that's disabled by step 3 or 4 isn't listed as a tool at all. Every redirect target passes steps 3–5 again.
 
+To see the lists in effect, ask Claude to run the `allowlist_info` tool. It shows each method's server and connector allowlists, where each is defined, and how to change it. Each `http_*` tool's description also lists its patterns and says where they were set.
+
 ## Setup (Docker behind nginx)
 
 1. **Build the image** (on the server, or anywhere with Docker):
@@ -70,7 +72,7 @@ A method that's disabled by step 3 or 4 isn't listed as a tool at all. Every red
    - **Authentication:** **No sign-in**. The dialog may mark "Sign in now" as *Detected*, because the server answers unauthenticated requests with `401`. This server doesn't use OAuth.
    - **Request headers:** header `authorization`, value `Bearer <TOKEN>`, including `Bearer` and the space. Mark it required.
 
-   Authentication settings can't be edited later. To change the token, remove the connector and add it again.
+   Authentication settings can't be edited later. To change the token, remove the connector and add it again. According to Anthropic's docs, the name and URL (including any `allow_*` parameters) can be edited from the connector's three-dot menu.
 
    In the connector's tool permissions (Customize > Connectors), allow `http_get` without approval, so the unattended job can use it, and set anything else it doesn't need to **Blocked**. Then attach the connector to the scheduled task.
 
@@ -125,7 +127,7 @@ The client can send its own allowlist. A request has to match both the server ru
 - **URL parameters:** `allow_get`, `allow_post`, `allow_put`, `allow_patch`, `allow_delete`, with one percent-encoded pattern per parameter (repeat the parameter for more).
 - **Headers**, for clients that can send arbitrary headers, such as Claude Code: `X-Allow-Get`, `X-Allow-Post`, and so on, with patterns separated by spaces. Claude's connector dialog accepts only header names that Anthropic has approved, so use URL parameters there.
 
-To manage allowlists entirely from the client side, give the token `GET = ["*"]` (or whichever methods it needs) on the server. Each tool's description shows the model the patterns that apply to it.
+To manage allowlists entirely from the client side, give the token `GET = ["*"]` (or whichever methods it needs) on the server. Then a connector URL without `allow_get` allows any public URL.
 
 ### Claude Code CLI
 
@@ -136,7 +138,9 @@ claude mcp add --transport http web https://mcp.example.com/mcp \
 
 ## Tools
 
-Every tool takes these arguments:
+`allowlist_info` takes no arguments and makes no web requests. It reports the allowlists in effect for the connection: the server list from `config.toml` and the connector list from the URL or headers, plus where and how to change each.
+
+Every `http_*` tool takes these arguments:
 
 - `url`: the absolute http(s) URL.
 - `headers`: optional request headers. The server sets `Host`, `Content-Length`, `Connection`, `Transfer-Encoding` and `Accept-Encoding` itself.

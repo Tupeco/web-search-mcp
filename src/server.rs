@@ -43,14 +43,19 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn authenticate<'a>(config: &'a Config, headers: &HeaderMap, path_token: Option<&str>) -> Option<&'a Client> {
+/// Returns the client and whether its token came from the URL path.
+fn authenticate<'a>(config: &'a Config, headers: &HeaderMap, path_token: Option<&str>) -> Option<(&'a Client, bool)> {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, token)| token.trim());
-    let token = bearer.or(path_token)?;
+    let (token, in_url) = match (bearer, path_token) {
+        (Some(token), _) => (token, false),
+        (None, Some(token)) => (token, true),
+        (None, None) => return None,
+    };
     let digest = hash_token(token);
     let mut found = None;
     for client in &config.clients {
@@ -58,7 +63,7 @@ fn authenticate<'a>(config: &'a Config, headers: &HeaderMap, path_token: Option<
             found = Some(client);
         }
     }
-    found
+    found.map(|client| (client, in_url))
 }
 
 async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
@@ -96,7 +101,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return response;
     }
 
-    let Some(client) = authenticate(config, &parts.headers, path_token) else {
+    let Some((client, token_in_url)) = authenticate(config, &parts.headers, path_token) else {
         (app.log)(json!({"event": "rejected", "reason": "missing or unknown token"}));
         let mut response = error_response(StatusCode::UNAUTHORIZED, -32001, "Unauthorized");
         response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
@@ -143,7 +148,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
 
     // If the MCP client disconnects, this future is dropped, which cancels any
     // upstream request in progress.
-    let ctx = ToolContext { config, client_name: &client.name, policy: &policy, fetcher: &app.fetcher, log: &app.log };
+    let ctx = ToolContext {
+        config,
+        client_name: &client.name,
+        token_in_url,
+        policy: &policy,
+        fetcher: &app.fetcher,
+        log: &app.log,
+    };
     let mut responses = Vec::new();
     for message in messages {
         if let Some(response) = handle_message(message, &ctx).await {

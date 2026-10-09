@@ -48,6 +48,17 @@ impl Method {
     fn index(self) -> usize {
         self as usize
     }
+
+    /// Endpoint URL parameter for the client-side allowlist, e.g. "allow_get".
+    pub fn param_name(self) -> String {
+        format!("allow_{}", self.as_str().to_ascii_lowercase())
+    }
+
+    /// Request header for the client-side allowlist, e.g. "X-Allow-Get".
+    pub fn header_name(self) -> String {
+        let name = self.as_str();
+        format!("X-Allow-{}{}", &name[..1], name[1..].to_ascii_lowercase())
+    }
 }
 
 impl fmt::Display for Method {
@@ -293,8 +304,8 @@ pub fn parse_client_rules(headers: &[(String, String)], query: &[(String, String
     let mut found = false;
     let mut lists: Vec<(&str, Vec<String>)> = Vec::new();
     for method in Method::ALL {
-        let header_name = format!("x-allow-{}", method.as_str().to_ascii_lowercase());
-        let param_name = format!("allow_{}", method.as_str().to_ascii_lowercase());
+        let header_name = method.header_name();
+        let param_name = method.param_name();
         let mut patterns = Vec::new();
         for (_, value) in headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case(&header_name)) {
             found = true;
@@ -341,6 +352,16 @@ impl Policy {
         Method::ALL.into_iter().filter(|m| self.allows(*m)).collect()
     }
 
+    /// Patterns from the server config for this token.
+    pub fn server_patterns(&self, method: Method) -> &[Pattern] {
+        self.server.get(method)
+    }
+
+    /// Patterns the client sent, or `None` if it sent no allowlist at all.
+    pub fn client_patterns(&self, method: Method) -> Option<&[Pattern]> {
+        self.client.as_ref().map(|c| c.get(method))
+    }
+
     pub fn check(&self, method: Method, url: &Url) -> Result<(), String> {
         if !self.allows(method) {
             return Err(format!("{method} requests are not enabled for this client"));
@@ -358,13 +379,19 @@ impl Policy {
         let list =
             |patterns: &[Pattern]| patterns.iter().map(|p| format!("- {}", p.source)).collect::<Vec<_>>().join("\n");
         let server = self.server.get(method);
-        let header = "Allowed URL patterns (\"*\" matches any characters):";
-        match &self.client {
-            None => format!("{header}\n{}", list(server)),
-            Some(client) if server.iter().any(|p| p.source == "*") => format!("{header}\n{}", list(client.get(method))),
+        let server_source = "the server's config.toml";
+        let client_source =
+            format!("the connector URL ({}=...) or {} header", method.param_name(), method.header_name());
+        let wildcard = "\"*\" matches any characters";
+        match self.client_patterns(method) {
+            None => format!("Allowed URL patterns, set in {server_source} ({wildcard}):\n{}", list(server)),
+            Some(client) if server.iter().any(|p| p.source == "*") => {
+                format!("Allowed URL patterns, set in {client_source} ({wildcard}):\n{}", list(client))
+            }
             Some(client) => format!(
-                "The URL must match one of these patterns (\"*\" matches any characters):\n{}\nand also one of these:\n{}",
-                list(client.get(method)),
+                "The URL must match one of these patterns, set in {client_source}:\n{}\n\
+                 and also one of these, set in {server_source}:\n{}\n({wildcard})",
+                list(client),
                 list(server)
             ),
         }
@@ -536,9 +563,12 @@ mod tests {
         let open = Policy::new(Arc::new(rules(&[("GET", &["*"])])), client.clone());
         assert_eq!(
             open.describe(Method::Get),
-            "Allowed URL patterns (\"*\" matches any characters):\n- https://example.com/*"
+            "Allowed URL patterns, set in the connector URL (allow_get=...) or X-Allow-Get header \
+             (\"*\" matches any characters):\n- https://example.com/*"
         );
         let narrow = Policy::new(Arc::new(rules(&[("GET", &["https://example.com/a/*"])])), client);
-        assert!(narrow.describe(Method::Get).contains("and also one of these"));
+        assert!(narrow.describe(Method::Get).contains("and also one of these, set in the server's config.toml:"));
+        let server_only = Policy::new(Arc::new(rules(&[("GET", &["https://example.com/a/*"])])), None);
+        assert!(server_only.describe(Method::Get).starts_with("Allowed URL patterns, set in the server's config.toml"));
     }
 }

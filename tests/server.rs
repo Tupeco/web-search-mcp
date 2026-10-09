@@ -206,8 +206,8 @@ async fn initialize_negotiates_the_protocol_version() {
 #[tokio::test]
 async fn lists_one_tool_per_allowed_method() {
     let env = env();
-    assert_eq!(tool_names(&env.mcp, TOKEN, &[]).await, ["http_get", "http_post", "http_put"]);
-    assert_eq!(tool_names(&env.mcp, GET_ONLY_TOKEN, &[]).await, ["http_get"]);
+    assert_eq!(tool_names(&env.mcp, TOKEN, &[]).await, ["http_get", "http_post", "http_put", "allowlist_info"]);
+    assert_eq!(tool_names(&env.mcp, GET_ONLY_TOKEN, &[]).await, ["http_get", "allowlist_info"]);
     let reply = rpc(&env.mcp, "tools/list", json!({})).await;
     let tools = &reply.body["result"]["tools"];
     assert!(tools[0]["description"].as_str().unwrap().contains(&format!("- {}/*", env.target)));
@@ -221,7 +221,7 @@ async fn client_headers_narrow_tools_and_urls() {
     let env = env();
     let only_page = format!("{}/page", env.target);
     let headers = [("x-allow-get", only_page.as_str())];
-    assert_eq!(tool_names(&env.mcp, TOKEN, &headers).await, ["http_get"]);
+    assert_eq!(tool_names(&env.mcp, TOKEN, &headers).await, ["http_get", "allowlist_info"]);
     let ok = call(&env.mcp, "http_get", json!({"url": only_page}), TOKEN, &headers).await;
     assert!(ok["result"]["isError"].is_null(), "{ok}");
     let denied = call(&env.mcp, "http_get", json!({"url": format!("{}/big", env.target)}), TOKEN, &headers).await;
@@ -248,7 +248,7 @@ async fn token_and_allowlist_in_the_url() {
     let url = format!("{mcp}/{TOKEN}{query}");
     let reply = rpc_with(&url, "tools/list", json!({}), None, &[]).await;
     assert_eq!(reply.status, StatusCode::OK);
-    assert_eq!(reply.body["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(reply.body["result"]["tools"].as_array().unwrap().len(), 2);
     let ok = rpc_with(
         &url,
         "tools/call",
@@ -278,11 +278,37 @@ async fn header_token_with_allowlist_in_the_url() {
     let target = &env.target;
     let encoded: String = url::form_urlencoded::byte_serialize(format!("{target}/gzip").as_bytes()).collect();
     let url = format!("{}?allow_get={encoded}", env.mcp);
-    assert_eq!(tool_names(&url, TOKEN, &[]).await, ["http_get"]);
+    assert_eq!(tool_names(&url, TOKEN, &[]).await, ["http_get", "allowlist_info"]);
     let ok = call(&url, "http_get", json!({"url": format!("{target}/gzip")}), TOKEN, &[]).await;
     assert!(ok["result"]["isError"].is_null(), "{ok}");
     let denied = call(&url, "http_get", json!({"url": format!("{target}/page")}), TOKEN, &[]).await;
     assert_eq!(denied["result"]["isError"], true);
+}
+
+#[tokio::test]
+async fn allowlist_info_reports_both_lists_and_their_sources() {
+    let env = env();
+    let target = &env.target;
+    let server_only = call_text(&env.mcp, "allowlist_info", json!({})).await;
+    let expected_get =
+        format!("GET (http_get): enabled\n  Server allowlist:\n    - {target}/*\n  Connector allowlist: not set\n");
+    assert!(server_only.starts_with("Allowlists for client \"full\".\n"), "{server_only}");
+    assert!(server_only.contains("under [clients.allow] in the [[clients]] entry named \"full\""));
+    assert!(server_only.contains(&expected_get), "{server_only}");
+    assert!(
+        server_only.contains("PATCH (http_patch): disabled (no patterns in config.toml)\n  Server allowlist: none")
+    );
+    assert!(server_only.contains("requests to private networks are allowed; timeout 1000 ms"));
+    assert!(server_only.ends_with("This connection sent its token in the Authorization header."));
+
+    let page = format!("{target}/page");
+    let narrowed = call(&env.mcp, "allowlist_info", json!({}), TOKEN, &[("x-allow-get", page.as_str())]).await;
+    let text = narrowed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains(&format!("  Connector allowlist:\n    - {page}\n")), "{text}");
+    assert!(text.contains("POST (http_post): disabled (the connector allowlist has no allow_post patterns)"));
+
+    let with_args = call_text(&env.mcp, "allowlist_info", json!({"verbose": true})).await;
+    assert_eq!(with_args, "Invalid arguments: allowlist_info takes no arguments");
 }
 
 #[tokio::test]
